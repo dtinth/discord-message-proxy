@@ -1,6 +1,6 @@
 # discord-message-proxy
 
-A tiny, single-file proxy that lets a client **read and post messages in specific
+A tiny, single-file proxy that lets a client **read, post, and edit messages in specific
 Discord channels** — without ever handing it your real bot token.
 
 The client authenticates to the proxy with its own *client-facing* token. The proxy
@@ -28,14 +28,16 @@ channels," behind a per-client token you can rotate independently.
 
 Regardless of channel, a token may only hit these routes:
 
-| Method | Route | Purpose |
-| ------ | ----- | ------- |
-| `GET`  | `/api/v{n}/channels/{id}/messages` | list messages |
-| `GET`  | `/api/v{n}/channels/{id}/messages/{mid}` | fetch one message |
-| `POST` | `/api/v{n}/channels/{id}/messages` | post a message |
+| Method  | Route | Purpose |
+| ------- | ----- | ------- |
+| `GET`   | `/api/v{n}/channels/{id}/messages` | list messages |
+| `GET`   | `/api/v{n}/channels/{id}/messages/{mid}` | fetch one message |
+| `POST`  | `/api/v{n}/channels/{id}/messages` | post a message |
+| `PATCH` | `/api/v{n}/channels/{id}/messages/{mid}` | edit a message |
 
-`{id}` must be in the token's allowed channel set. Everything else — edits, deletes,
-reactions, guild/user routes, posting to a message id — returns `403`.
+`{id}` must be in the token's allowed channel set. Editing is subject to Discord's own
+rule that a bot may only edit messages it authored. Everything else — deletes, reactions,
+guild/user routes, posting to a message id — returns `403`.
 
 ## Quick start
 

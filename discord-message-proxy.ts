@@ -9,12 +9,13 @@
  *
  *   client ──(Bot <AUTH token>)──▶ proxy ──(Bot DISCORD_BOT_TOKEN)──▶ discord.com
  *
- * Unlike a full pass-through, this proxy only permits **reading and posting messages**
- * in an explicit set of channels:
+ * Unlike a full pass-through, this proxy only permits **reading, posting, and editing
+ * messages** in an explicit set of channels:
  *
- *   GET  /api/v{n}/channels/{id}/messages        list messages
- *   GET  /api/v{n}/channels/{id}/messages/{mid}  fetch one message
- *   POST /api/v{n}/channels/{id}/messages        post a message
+ *   GET   /api/v{n}/channels/{id}/messages        list messages
+ *   GET   /api/v{n}/channels/{id}/messages/{mid}  fetch one message
+ *   POST  /api/v{n}/channels/{id}/messages        post a message
+ *   PATCH /api/v{n}/channels/{id}/messages/{mid}  edit a message (bot's own only)
  *
  * Everything else is refused with 403. Allowed requests are relayed untouched (paths,
  * query, body, rate-limit headers, status codes), so any Discord library or raw curl
@@ -128,14 +129,16 @@ function findGrant(presented: string): Grant | undefined {
   return GRANTS.find((g) => timingSafeEqual(g.hash, h));
 }
 
-/** Only message list/fetch (GET) and post (POST) within an allowed channel. */
+/** Only message list/fetch (GET), post (POST), and edit (PATCH) within an allowed channel. */
 function isAllowed(method: string, pathname: string, channels: Set<string>): boolean {
   const m = MESSAGE_ROUTE.exec(pathname);
   if (!m) return false;
   const [, channelId, singleMessage] = m;
-  // GET works on both the collection and a single message; POST only on the collection.
+  // GET works on the collection and a single message; POST only on the collection;
+  // PATCH (edit) only targets a single message.
   if (method === "GET") { /* ok */ }
   else if (method === "POST" && !singleMessage) { /* ok */ }
+  else if (method === "PATCH" && singleMessage) { /* ok */ }
   else return false;
   return channels.has("*") || channels.has(channelId);
 }
