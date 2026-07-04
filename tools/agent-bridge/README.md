@@ -77,6 +77,11 @@ heads-up from someone not in the room. When used that way, an agent should:
   actually done.
 - **Say goodbye on `monitor` exit** — send a farewell like "No longer monitoring this channel" so people don't keep
   typing expecting a reply.
+- **Favor clarity over brevity when asking a question** — a teammate reading on their phone has none of your context, so
+  spell out what you're asking and why instead of trimming it down to something terse.
+- **Ask one question at a time, not a batch** — batched questions overwhelm the reader, and one answer can change
+  whether a later question even makes sense. Ask, wait for the reply, then ask the next one, building up a clear
+  decision tree instead of a wall of text.
 
 Running the script with no arguments prints this same guidance as part of its usage text.
 
