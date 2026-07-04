@@ -1,7 +1,7 @@
 {
   "tasks": {
     "tidy": "deno fmt",
-    "check": "deno check discord-message-proxy.ts discord-message-proxy.test.ts",
+    "check": "deno check discord-message-proxy.ts discord-message-proxy.test.ts discord-agent-bridge.ts discord-agent-bridge.test.ts",
     "test": "deno test -A"
   },
   "fmt": {

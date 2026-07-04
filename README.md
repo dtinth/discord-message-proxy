@@ -125,6 +125,43 @@ docker run -p 8000:8000 \
   https://raw.githubusercontent.com/dtinth/discord-message-proxy/main/discord-message-proxy.ts
 ```
 
+## discord-agent-bridge
+
+The repo also ships `discord-agent-bridge.ts` — a completely independent, single-file CLI for reading and posting
+channel messages, designed for agent harnesses and shell pipelines. It talks straight to Discord with a bot token by
+default, or through a running proxy by overriding the API base with a proxy-minted JWT.
+
+```sh
+export DISCORD_TOKEN='bot-token-or-proxy-jwt'
+export DISCORD_CHANNEL='123456789012345678'
+export DISCORD_API='https://your-proxy.example/api/v10'   # optional; omit to talk to Discord directly
+
+./discord-agent-bridge.ts                       # usage
+./discord-agent-bridge.ts send hello world      # text from args, --file <path>, or stdin
+./discord-agent-bridge.ts edit <messageId> oops # same text sources as send
+./discord-agent-bridge.ts delete <messageId>
+./discord-agent-bridge.ts read --limit 20       # one-shot fetch, oldest first
+./discord-agent-bridge.ts monitor               # poll for new messages forever (default every 20s)
+```
+
+Output is NDJSON — exactly one line per message, with an ISO 8601 `timestamp`:
+
+```json
+{
+  "id": "…",
+  "timestamp": "2026-01-01T00:00:00.000000+00:00",
+  "author": "name",
+  "author_id": "…",
+  "bot": false,
+  "content": "hi"
+}
+```
+
+`read` and `monitor` skip messages authored by bots (including this one's own) unless you pass `--include-bots`.
+`monitor` remembers the newest message at startup — no backlog — then emits each newer message as it arrives, retrying
+through transient failures; tune the interval with `DISCORD_POLL_INTERVAL` (seconds, default 20). The one-line-per-event
+output is built to feed line-oriented watchers (e.g. an agent's background monitor) without extra parsing.
+
 ## Development
 
 The proxy itself stays a self-contained single file (`discord-message-proxy.ts`); tests live alongside it.
