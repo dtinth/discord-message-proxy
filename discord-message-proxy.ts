@@ -367,6 +367,7 @@ const UI_HTML = /* html */ `<!doctype html>
 var $ = function (id) { return document.getElementById(id); };
 
 var PROMPT_TEMPLATE = [
+  "<discord_integration_info>",
   "You can read, post, edit, and delete messages in a Discord channel through a REST proxy.",
   "",
   "Proxy base URL: {{ORIGIN}}",
@@ -390,6 +391,7 @@ var PROMPT_TEMPLATE = [
   "  -H 'Authorization: Bot {{TOKEN}}' \\\\",
   "  -H 'Content-Type: application/json' \\\\",
   "  -d '{\\"content\\": \\"hello\\"}'",
+  "</discord_integration_info>",
 ].join("\\n");
 
 // The full prompt (with the real token) lives only in these variables; the visible
