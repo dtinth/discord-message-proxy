@@ -304,11 +304,13 @@ const UI_HTML = /* html */ `<!doctype html>
     margin: .5rem 0 0; padding: .35rem .8rem; font-size: .85rem;
     background: transparent; color: var(--accent); border-color: var(--border);
   }
-  textarea {
+  textarea, input.mono {
     width: 100%; padding: .55rem .7rem; margin-top: .2rem; color: var(--text);
     background: var(--code); border: 1px solid var(--border); border-radius: 8px;
-    font: .8rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical;
+    font: .8rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   }
+  textarea { resize: vertical; }
+  textarea:focus, input.mono:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .error { color: var(--err); margin-top: 1rem; font-size: .9rem; display: none; }
   .expires { color: var(--ok); font-size: .9rem; margin: 0 0 1rem; }
   #result { display: none; }
@@ -346,11 +348,12 @@ const UI_HTML = /* html */ `<!doctype html>
     <p class="expires" id="expiresAt"></p>
 
     <label for="token">Token</label>
-    <textarea id="token" rows="4" readonly></textarea>
+    <input id="token" class="mono" readonly spellcheck="false">
     <button class="copy" data-copy="token">Copy token</button>
 
-    <label for="prompt">Prompt <span class="hint">— paste this into an AI agent to let it use the channel</span></label>
-    <textarea id="prompt" rows="14" readonly></textarea>
+    <label for="prompt">Prompt <span class="hint">— paste this into an AI agent to let it use the channel.
+      The token's signature is masked on screen; click into the box to reveal it. Copying always includes it.</span></label>
+    <textarea id="prompt" rows="14" readonly spellcheck="false"></textarea>
     <button class="copy" data-copy="prompt">Copy prompt</button>
   </section>
 
@@ -389,6 +392,18 @@ var PROMPT_TEMPLATE = [
   "  -d '{\\"content\\": \\"hello\\"}'",
 ].join("\\n");
 
+// The full prompt (with the real token) lives only in these variables; the visible
+// textarea holds the masked version until focused.
+var promptFull = "";
+var promptMasked = "";
+
+/** Replace the JWT's signature segment with asterisks for on-screen display. */
+function maskToken(token) {
+  var parts = token.split(".");
+  if (parts.length !== 3) return token;
+  return parts[0] + "." + parts[1] + "." + "*".repeat(parts[2].length);
+}
+
 function buildPrompt(channels, token, expiresAt) {
   var ids = channels === "*" ? [] : channels.split(",");
   var ch = ids.length === 1 ? ids[0] : "{channelId}";
@@ -425,7 +440,9 @@ $("form").addEventListener("submit", async function (e) {
     if (!res.ok) throw new Error(data.message || "request failed (HTTP " + res.status + ")");
     $("expiresAt").textContent = "Token generated — expires " + data.expiresAt;
     $("token").value = data.token;
-    $("prompt").value = buildPrompt(channels, data.token, data.expiresAt);
+    promptFull = buildPrompt(channels, data.token, data.expiresAt);
+    promptMasked = buildPrompt(channels, maskToken(data.token), data.expiresAt);
+    $("prompt").value = promptMasked;
     $("result").style.display = "block";
   } catch (err) {
     error.textContent = err.message;
@@ -436,9 +453,19 @@ $("form").addEventListener("submit", async function (e) {
   }
 });
 
+// Reveal the real token while the prompt is focused; re-mask on blur.
+$("prompt").addEventListener("focus", function () {
+  if (promptFull) this.value = promptFull;
+});
+$("prompt").addEventListener("blur", function () {
+  if (promptMasked) this.value = promptMasked;
+});
+
 document.querySelectorAll("button.copy").forEach(function (btn) {
   btn.addEventListener("click", async function () {
-    await navigator.clipboard.writeText($(btn.dataset.copy).value);
+    // The prompt textarea may be showing the masked version — always copy the full one.
+    var text = btn.dataset.copy === "prompt" && promptFull ? promptFull : $(btn.dataset.copy).value;
+    await navigator.clipboard.writeText(text);
     var original = btn.textContent;
     btn.textContent = "Copied!";
     setTimeout(function () { btn.textContent = original; }, 1200);
