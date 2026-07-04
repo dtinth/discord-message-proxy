@@ -1,0 +1,10 @@
+{
+  "tasks": {
+    "tidy": "deno fmt",
+    "check": "deno check discord-message-proxy.ts discord-message-proxy.test.ts",
+    "test": "deno test -A"
+  },
+  "fmt": {
+    "lineWidth": 120
+  }
+}
