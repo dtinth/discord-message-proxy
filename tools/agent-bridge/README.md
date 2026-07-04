@@ -65,6 +65,21 @@ authored by bots (including this script's own messages) unless you pass `--inclu
 arrives, oldest first, retrying through transient failures (network errors, 5xx, rate limits) without exiting. The
 one-line-per-message output is built to feed line-oriented watchers without any parsing beyond `JSON.parse` per line.
 
+## Best practices
+
+This tool is meant for looping teammates into a session over Discord — e.g. an agent that wants a second opinion or a
+heads-up from someone not in the room. When used that way, an agent should:
+
+- **Greet on `monitor` startup** — send a message like "You can type here — I'm watching this channel now" before going
+  quiet, so people know it's safe to type.
+- **Acknowledge before working** — when a message arrives, reply briefly with what you understood and what you'll do
+  next, _before_ starting. For long-running work, that first reply isn't the answer — send a second one once the work is
+  actually done.
+- **Say goodbye on `monitor` exit** — send a farewell like "No longer monitoring this channel" so people don't keep
+  typing expecting a reply.
+
+Running the script with no arguments prints this same guidance as part of its usage text.
+
 ## Development
 
 Tests live alongside the script in this folder and run as part of the repo-wide `deno task check` / `deno task test`
