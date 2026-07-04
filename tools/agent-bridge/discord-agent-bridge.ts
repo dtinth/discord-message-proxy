@@ -67,6 +67,7 @@ Best practices (for agents using this to loop teammates into a session over Disc
     people don't keep typing expecting a reply.
   - When asking a question, favor being easy to understand over being terse — a teammate
     reading on their phone won't have your context, so spell out what you're asking and why.
+    A concrete example or two of the options often makes it click faster than more prose.
   - Ask one question at a time, not a batch. Batched questions overwhelm the reader, and one
     answer can change whether a later question even makes sense. Ask, wait for the reply,
     then ask the next one — building up a clear decision tree instead of a wall of text.`;
