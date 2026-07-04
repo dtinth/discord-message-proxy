@@ -64,7 +64,12 @@ Best practices (for agents using this to loop teammates into a session over Disc
     you understood and what you'll do next. For long-running work, don't leave that "got it"
     as the only reply — send a second one once the work is actually done.
   - When you stop monitor, send a farewell (e.g. "No longer monitoring this channel") so
-    people don't keep typing expecting a reply.`;
+    people don't keep typing expecting a reply.
+  - When asking a question, favor being easy to understand over being terse — a teammate
+    reading on their phone won't have your context, so spell out what you're asking and why.
+  - Ask one question at a time, not a batch. Batched questions overwhelm the reader, and one
+    answer can change whether a later question even makes sense. Ask, wait for the reply,
+    then ask the next one — building up a clear decision tree instead of a wall of text.`;
 
 const UA = "DiscordBot (https://github.com/dtinth/discord-message-proxy, 1.0) discord-agent-bridge";
 
