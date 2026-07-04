@@ -10,6 +10,10 @@
  * event streams (agent harnesses, `grep --line-buffered`, etc.) without any parsing
  * gymnastics. Messages authored by bots are skipped unless --include-bots is passed.
  *
+ * Meant for looping teammates into a session over Discord — see the "Best practices"
+ * section of the usage text (run with no arguments) for how an agent should behave
+ * around greeting, acknowledging, and signing off.
+ *
  * ── Commands ─────────────────────────────────────────────────────────────────
  *   (none)                                        print usage
  *   send [text...] [--file <path>]                send a message (no text: read stdin)
@@ -51,7 +55,16 @@ Environment:
 
 Output format (NDJSON, one message per line):
   {"id":"…","timestamp":"2026-01-01T00:00:00.000000+00:00","author":"name","author_id":"…","bot":false,"content":"hi"}
-"attachments" (array of URLs) and "edited_timestamp" appear only when present.`;
+"attachments" (array of URLs) and "edited_timestamp" appear only when present.
+
+Best practices (for agents using this to loop teammates into a session over Discord):
+  - When you start monitor, send a greeting first (e.g. "You can type here — I'm watching
+    this channel now") so people know you're listening before they bother typing anything.
+  - When a message arrives, acknowledge it with a short reply before starting work: say what
+    you understood and what you'll do next. For long-running work, don't leave that "got it"
+    as the only reply — send a second one once the work is actually done.
+  - When you stop monitor, send a farewell (e.g. "No longer monitoring this channel") so
+    people don't keep typing expecting a reply.`;
 
 const UA = "DiscordBot (https://github.com/dtinth/discord-message-proxy, 1.0) discord-agent-bridge";
 
