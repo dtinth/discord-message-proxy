@@ -1,0 +1,6 @@
+.git
+.github
+tools
+*.test.ts
+README.md
+LICENSE

@@ -117,6 +117,17 @@ also unauthenticated — minting itself requires the signing secret.
 
 ### Docker
 
+A prebuilt multi-arch (`linux/amd64` + `linux/arm64`) image is published to GHCR on every push to `main`:
+
+```sh
+docker run -p 8000:8000 \
+  -e DISCORD_BOT_TOKEN='your-real-bot-token' \
+  -e SIGNING_SECRET='a-long-random-string-at-least-16-chars' \
+  ghcr.io/dtinth/discord-message-proxy:latest
+```
+
+Or run the raw script in the stock Deno image, no build required:
+
 ```sh
 docker run -p 8000:8000 \
   -e DISCORD_BOT_TOKEN='your-real-bot-token' \
