@@ -5,6 +5,16 @@ and shell pipelines. It talks straight to Discord with a bot token by default, o
 [`discord-message-proxy`](../../README.md) by overriding the API base with a proxy-minted JWT. The two scripts don't
 share any code; `discord-agent-bridge.ts` just happens to speak the same REST surface the proxy exposes.
 
+Run it straight from a public URL — no checkout, no env vars needed just to see the usage (which includes the Best
+practices below):
+
+```sh
+deno run --allow-net --allow-env --allow-read \
+  https://raw.githubusercontent.com/dtinth/discord-message-proxy/main/tools/agent-bridge/discord-agent-bridge.ts
+```
+
+To actually talk to a channel, set the environment first:
+
 ```sh
 export DISCORD_TOKEN='bot-token-or-proxy-jwt'
 export DISCORD_CHANNEL='123456789012345678'

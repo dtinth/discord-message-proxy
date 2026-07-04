@@ -27,6 +27,12 @@
  *   DISCORD_CHANNEL        (required)  channel id to operate on
  *   DISCORD_API            (optional)  API base, default "https://discord.com/api/v10"
  *   DISCORD_POLL_INTERVAL  (optional)  monitor poll interval in seconds, default 20
+ *
+ * ── Run ──────────────────────────────────────────────────────────────────────
+ *   deno run --allow-net --allow-env --allow-read discord-agent-bridge.ts
+ *   # or straight from a public URL, no checkout or env vars needed to see usage:
+ *   deno run --allow-net --allow-env --allow-read \
+ *     https://raw.githubusercontent.com/dtinth/discord-message-proxy/main/tools/agent-bridge/discord-agent-bridge.ts
  */
 
 const USAGE = `discord-agent-bridge — read and post Discord channel messages, one NDJSON line per message
