@@ -84,7 +84,10 @@ This tool is meant for looping teammates into a session over Discord — e.g. an
 heads-up from someone not in the room. When used that way, an agent should:
 
 - **Run `monitor` through a persistent/indefinite watch** — it never exits on its own, so a background mechanism with a
-  short default timeout will kill it before the next message ever arrives, and messages will be missed silently.
+  short default timeout will kill it before the next message ever arrives, and messages will be missed silently. In
+  **Claude Code**, this command is designed for the
+  [Monitor tool](https://code.claude.com/docs/en/tools-reference#monitor-tool) with `persistent: true` — not Bash's
+  `run_in_background`, which times out and is meant for one-shot completion rather than an ongoing watch.
 - **Greet on `monitor` startup** — send a message like "You can type here — I'm watching this channel now" before going
   quiet, so people know it's safe to type.
 - **Acknowledge before working** — when a message arrives, reply briefly with what you understood and what you'll do

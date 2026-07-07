@@ -21,7 +21,9 @@
  *   delete <messageId>                            delete a message
  *   read [--limit N] [--include-bots]             fetch recent messages once, oldest first
  *   monitor [--include-bots]                      poll for new messages forever (never exits —
- *                                                  launch via a persistent/indefinite background watch)
+ *                                                  launch via a persistent/indefinite background watch;
+ *                                                  in Claude Code, this is the Monitor tool with
+ *                                                  persistent: true, not Bash's run_in_background)
  *
  * ── Config (env) ─────────────────────────────────────────────────────────────
  *   DISCORD_TOKEN          (required)  bot token or proxy JWT; sent as "Bot <token>"
@@ -57,6 +59,10 @@ Usage:
       "persistent: true" option), not one with a short default timeout. A watch that times
       out after a few minutes will be killed long before the next message arrives and you
       will silently miss messages.
+      If you are Claude Code: this is exactly what the Monitor tool is for — run this
+      command with Monitor's persistent: true option, not Bash's run_in_background (which
+      has a short default timeout and is meant for one-shot completion, not an ongoing
+      watch). See https://code.claude.com/docs/en/tools-reference#monitor-tool
 
 Environment:
   DISCORD_TOKEN          (required)  bot token or proxy JWT; sent as "Authorization: Bot <token>"
