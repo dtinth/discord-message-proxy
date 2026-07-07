@@ -29,12 +29,15 @@
  * works by only overriding the base URL.
  *
  * ── Config (env) ─────────────────────────────────────────────────────────────
- *   DISCORD_BOT_TOKEN   (required)  real bot token, used upstream toward Discord
- *   SIGNING_SECRET      (required)  HS256 shared secret for client JWTs (≥ 16 chars).
- *                                   Whoever knows it can mint tokens for any channel.
- *   UPSTREAM            (optional)  default "https://discord.com"
- *   DEFAULT_USER_AGENT  (optional)  UA sent upstream if the client didn't set one
- *   PORT                (optional)  listen port (default 8000; Deno Deploy sets its own)
+ *   DISCORD_BOT_TOKEN      (required)  the default real bot token, used upstream toward Discord
+ *   DISCORD_BOT_TOKEN_*    (optional)  additional named bot tokens, e.g. DISCORD_BOT_TOKEN_SUPPORT
+ *                                      registers a bot named "SUPPORT". A minted token can request
+ *                                      one by name (default: the unnamed DISCORD_BOT_TOKEN above).
+ *   SIGNING_SECRET         (required)  HS256 shared secret for client JWTs (≥ 16 chars).
+ *                                      Whoever knows it can mint tokens for any channel or bot.
+ *   UPSTREAM               (optional)  default "https://discord.com"
+ *   DEFAULT_USER_AGENT     (optional)  UA sent upstream if the client didn't set one
+ *   PORT                   (optional)  listen port (default 8000; Deno Deploy sets its own)
  *
  * ── Run ──────────────────────────────────────────────────────────────────────
  *   deno run --allow-net --allow-env discord-message-proxy.ts
@@ -51,7 +54,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { jwtVerify, SignJWT } from "npm:jose@6";
 
-const BOT_TOKEN = requireEnv("DISCORD_BOT_TOKEN");
+const DEFAULT_BOT_TOKEN = requireEnv("DISCORD_BOT_TOKEN");
+const NAMED_BOT_TOKENS = parseNamedBotTokens();
 const SIGNING_SECRET = requireEnv("SIGNING_SECRET");
 if (SIGNING_SECRET.length < 16) fatal("SIGNING_SECRET must be at least 16 characters");
 const SIGNING_KEY = new TextEncoder().encode(SIGNING_SECRET);
@@ -92,26 +96,39 @@ async function handler(req: Request): Promise<Response> {
   }
   if (url.pathname === "/token") return issueToken(req);
 
+  // Unauthenticated: the UI's bot picker needs the list of configured names (not secrets).
+  if (url.pathname === "/bots") {
+    if (req.method !== "GET") return json(405, { message: "proxy: method not allowed", code: 0 });
+    return json(200, { bots: [...NAMED_BOT_TOKENS.keys()].sort() });
+  }
+
   // 1. Identify the client by its JWT (accepts "Bot <jwt>" or a bare jwt).
   const presented = (req.headers.get("authorization") ?? "").replace(/^Bot\s+/i, "").trim();
-  const channels = presented ? await verifyToken(presented) : undefined;
-  if (!channels) {
+  const claims = presented ? await verifyToken(presented) : undefined;
+  if (!claims) {
     log(`401 ${req.method} ${url.pathname} (invalid or expired token)`);
     return json(401, { message: "proxy: unauthorized", code: 0 });
   }
 
   // 2. Enforce the narrow scope: only message ops in the token's channels.
-  if (!isAllowed(req.method, url.pathname, channels)) {
+  if (!isAllowed(req.method, url.pathname, claims.channels)) {
     log(`403 ${req.method} ${url.pathname} (not permitted for this token)`);
     return json(403, { message: "proxy: route not allowed", code: 0 });
   }
 
-  // 3. Rebuild the request toward Discord with the REAL bot token swapped in.
+  // 3. Resolve which real bot token to use — the token's own name, or the default.
+  const botToken = claims.bot ? NAMED_BOT_TOKENS.get(claims.bot) : DEFAULT_BOT_TOKEN;
+  if (!botToken) {
+    log(`401 ${req.method} ${url.pathname} (bot "${claims.bot}" no longer configured)`);
+    return json(401, { message: "proxy: bot no longer configured", code: 0 });
+  }
+
+  // 4. Rebuild the request toward Discord with the REAL bot token swapped in.
   const headers = new Headers();
   for (const [k, v] of req.headers) {
     if (!STRIP_REQ.has(k.toLowerCase())) headers.set(k, v);
   }
-  headers.set("authorization", `Bot ${BOT_TOKEN}`);
+  headers.set("authorization", `Bot ${botToken}`);
   if (!headers.has("user-agent")) headers.set("user-agent", DEFAULT_UA);
 
   const init: RequestInit = { method: req.method, headers, redirect: "manual" };
@@ -127,7 +144,7 @@ async function handler(req: Request): Promise<Response> {
     return json(502, { message: "proxy: upstream fetch failed", code: 0 });
   }
 
-  // 4. Relay the response verbatim (rate-limit headers included), minus wire-encoding headers.
+  // 5. Relay the response verbatim (rate-limit headers included), minus wire-encoding headers.
   const out = new Headers();
   for (const [k, v] of upstream.headers) {
     if (!STRIP_RES.has(k.toLowerCase())) out.set(k, v);
@@ -138,11 +155,11 @@ async function handler(req: Request): Promise<Response> {
 
 // ── token minting ──────────────────────────────────────────────────────────
 
-/** POST /token {secret, channels, expiresIn} → {token, expiresAt}. */
+/** POST /token {secret, channels, expiresIn, bot?} → {token, expiresAt, bot?}. */
 async function issueToken(req: Request): Promise<Response> {
   if (req.method !== "POST") return json(405, { message: "proxy: method not allowed", code: 0 });
 
-  let body: { secret?: unknown; channels?: unknown; expiresIn?: unknown };
+  let body: { secret?: unknown; channels?: unknown; expiresIn?: unknown; bot?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -170,15 +187,21 @@ async function issueToken(req: Request): Promise<Response> {
     });
   }
 
+  // Omitted/empty means the default bot; otherwise it must name a configured one.
+  const botInput = typeof body.bot === "string" ? body.bot.trim() : "";
+  if (botInput && !NAMED_BOT_TOKENS.has(botInput)) {
+    return json(400, { message: `proxy: unknown bot "${botInput}"`, code: 0 });
+  }
+
   const now = Math.floor(Date.now() / 1000);
-  const token = await new SignJWT({ ch })
+  const token = await new SignJWT({ ch, ...(botInput ? { bot: botInput } : {}) })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt(now)
     .setExpirationTime(now + expiresIn)
     .sign(SIGNING_KEY);
   const expiresAt = new Date((now + expiresIn) * 1000).toISOString();
-  log(`token issued: channels=${ch} expires=${expiresAt}`);
-  return json(200, { token, expiresAt });
+  log(`token issued: channels=${ch} bot=${botInput || "(default)"} expires=${expiresAt}`);
+  return json(200, { token, expiresAt, ...(botInput ? { bot: botInput } : {}) });
 }
 
 /** Accept "123,456" or "*"; return the normalized claim string, or undefined if invalid. */
@@ -193,13 +216,20 @@ function normalizeChannels(input: unknown): string | undefined {
 
 // ── token verification ─────────────────────────────────────────────────────
 
-/** Verify the JWT (signature + expiry) and return its channel scope, or undefined. */
-async function verifyToken(token: string): Promise<Set<string> | undefined> {
+interface TokenClaims {
+  channels: Set<string>;
+  bot?: string; // absent means the default bot
+}
+
+/** Verify the JWT (signature + expiry) and return its channel scope and bot name, or undefined. */
+async function verifyToken(token: string): Promise<TokenClaims | undefined> {
   try {
     const { payload } = await jwtVerify(token, SIGNING_KEY, { algorithms: ["HS256"] });
     if (typeof payload.ch !== "string") return undefined;
     const channels = new Set(payload.ch.split(",").map((c) => c.trim()).filter(Boolean));
-    return channels.size > 0 ? channels : undefined;
+    if (channels.size === 0) return undefined;
+    if (payload.bot !== undefined && typeof payload.bot !== "string") return undefined;
+    return { channels, bot: payload.bot || undefined };
   } catch {
     return undefined;
   }
@@ -238,6 +268,18 @@ function requireEnv(name: string): string {
   const v = Deno.env.get(name);
   if (!v) fatal(`missing required env var ${name}`);
   return v;
+}
+
+/** Collect DISCORD_BOT_TOKEN_<NAME> env vars into a name → token map. */
+function parseNamedBotTokens(): Map<string, string> {
+  const tokens = new Map<string, string>();
+  for (const [key, value] of Object.entries(Deno.env.toObject())) {
+    const m = /^DISCORD_BOT_TOKEN_(.+)$/.exec(key);
+    if (!m) continue;
+    if (!value) fatal(`env var ${key} is set but empty`);
+    tokens.set(m[1], value);
+  }
+  return tokens;
 }
 
 function fatal(msg: string): never {
@@ -326,6 +368,12 @@ const UI_HTML = /* html */ `<!doctype html>
   <form class="card" id="form">
     <label for="channels">Channel ID(s) <span class="hint">— comma-separated, or <code>*</code> for any channel</span></label>
     <input id="channels" required autocomplete="off" spellcheck="false" placeholder="123456789012345678">
+
+    <label for="bot" class="bot-field" style="display:none">Bot <span class="hint">— which bot token this access
+      token should use</span></label>
+    <select id="bot" class="bot-field" style="display:none">
+      <option value="">(default)</option>
+    </select>
 
     <label for="secret">Signing secret</label>
     <input id="secret" type="password" required autocomplete="off" placeholder="the proxy's SIGNING_SECRET">
@@ -419,6 +467,23 @@ function buildPrompt(channels, token, expiresAt) {
     .replaceAll("{{TOKEN}}", token);
 }
 
+// Populate the bot picker; hide it entirely on single-bot deployments (no named bots).
+fetch("/bots")
+  .then(function (res) { return res.json(); })
+  .then(function (data) {
+    var bots = (data && data.bots) || [];
+    if (bots.length === 0) return;
+    var select = $("bot");
+    bots.forEach(function (name) {
+      var option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      select.appendChild(option);
+    });
+    document.querySelectorAll(".bot-field").forEach(function (el) { el.style.display = ""; });
+  })
+  .catch(function () { /* bot picker just stays hidden */ });
+
 $("form").addEventListener("submit", async function (e) {
   e.preventDefault();
   var button = $("generate");
@@ -436,11 +501,13 @@ $("form").addEventListener("submit", async function (e) {
         secret: $("secret").value,
         channels: channels,
         expiresIn: Number($("expires").value),
+        bot: $("bot").value,
       }),
     });
     var data = await res.json().catch(function () { return {}; });
     if (!res.ok) throw new Error(data.message || "request failed (HTTP " + res.status + ")");
-    $("expiresAt").textContent = "Token generated — expires " + data.expiresAt;
+    $("expiresAt").textContent = "Token generated — expires " + data.expiresAt +
+      (data.bot ? " (bot: " + data.bot + ")" : "");
     $("token").value = data.token;
     promptFull = buildPrompt(channels, data.token, data.expiresAt);
     promptMasked = buildPrompt(channels, maskToken(data.token), data.expiresAt);

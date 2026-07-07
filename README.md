@@ -68,9 +68,10 @@ Clients may present the token as either `Bot <token>` or a bare `<token>`.
 
 ## Tokens
 
-Tokens are JWTs signed with `SIGNING_SECRET` (HS256) carrying two things:
+Tokens are JWTs signed with `SIGNING_SECRET` (HS256) carrying:
 
 - `ch` — allowed channel IDs, comma-separated (e.g. `"123,456"`), or `"*"` for any channel
+- `bot` — which configured bot token to use (see [Multiple bots](#multiple-bots)); omitted means the default
 - `exp` — standard expiry; the proxy rejects expired tokens with `401`
 
 There is no token store and no revocation list — a token is valid until it expires, or until you rotate `SIGNING_SECRET`
@@ -87,20 +88,34 @@ curl http://localhost:8000/token \
 # → {"token": "eyJ...", "expiresAt": "2026-07-11T00:00:00.000Z"}
 ```
 
-`channels` is a comma-separated ID list or `"*"`; `expiresIn` is in seconds (60 to 10 years). A wrong secret returns
-`401`.
+`channels` is a comma-separated ID list or `"*"`; `expiresIn` is in seconds (60 to 10 years). An optional `bot` field
+selects a [named bot](#multiple-bots) (omit it, or pass `""`, for the default); an unknown name returns `400`. A wrong
+secret returns `401`.
+
+## Multiple bots
+
+If you run more than one Discord bot, register the extra ones as `DISCORD_BOT_TOKEN_<NAME>` — e.g.
+`DISCORD_BOT_TOKEN_SUPPORT=...` registers a bot named `SUPPORT`, alongside the required `DISCORD_BOT_TOKEN` (the
+default, unnamed one). A minted token is scoped to exactly one bot: the `bot` field at minting time picks which real
+token the proxy swaps in, and that choice can't be changed later without minting a new token.
+
+The web UI's minting form shows a **Bot** dropdown — populated from the unauthenticated `GET /bots` endpoint (which
+lists configured names, never the secrets) — only when at least one named bot is configured; single-bot deployments see
+the same form as before. If a bot is later removed from the environment, tokens that named it start failing with `401`
+rather than silently falling back to the default.
 
 ## Configuration
 
 All configuration is via environment variables.
 
-| Variable             | Required | Default                             | Description                                                                                        |
-| -------------------- | -------- | ----------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `DISCORD_BOT_TOKEN`  | ✅       | —                                   | Your real bot token, used upstream toward Discord.                                                 |
-| `SIGNING_SECRET`     | ✅       | —                                   | HS256 shared secret for client JWTs, ≥ 16 chars. Whoever knows it can mint tokens for any channel. |
-| `UPSTREAM`           |          | `https://discord.com`               | Where to forward requests.                                                                         |
-| `DEFAULT_USER_AGENT` |          | a generic `DiscordBot (...)` string | UA sent upstream if the client didn't set one.                                                     |
-| `PORT`               |          | `8000`                              | Listen port. (Deno Deploy sets this for you.)                                                      |
+| Variable              | Required | Default                             | Description                                                                                               |
+| --------------------- | -------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `DISCORD_BOT_TOKEN`   | ✅       | —                                   | The default real bot token, used upstream toward Discord.                                                 |
+| `DISCORD_BOT_TOKEN_*` |          | —                                   | Additional named bot tokens — see [Multiple bots](#multiple-bots).                                        |
+| `SIGNING_SECRET`      | ✅       | —                                   | HS256 shared secret for client JWTs, ≥ 16 chars. Whoever knows it can mint tokens for any channel or bot. |
+| `UPSTREAM`            |          | `https://discord.com`               | Where to forward requests.                                                                                |
+| `DEFAULT_USER_AGENT`  |          | a generic `DiscordBot (...)` string | UA sent upstream if the client didn't set one.                                                            |
+| `PORT`                |          | `8000`                              | Listen port. (Deno Deploy sets this for you.)                                                             |
 
 The signing secret is compared in constant time (SHA-256 + `timingSafeEqual`) when minting, and JWT verification is
 handled by [jose](https://github.com/panva/jose).

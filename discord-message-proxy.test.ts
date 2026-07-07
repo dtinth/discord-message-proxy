@@ -11,6 +11,7 @@ import { SignJWT } from "npm:jose@6";
 
 const SECRET = "test-signing-secret-0123456789";
 const BOT_TOKEN = "real-bot-token";
+const SUPPORT_BOT_TOKEN = "support-bot-token";
 const SIGNING_KEY = new TextEncoder().encode(SECRET);
 
 interface UpstreamRequest {
@@ -21,14 +22,18 @@ interface UpstreamRequest {
   body: string;
 }
 
-/** Mint a JWT directly (bypassing /token) so we can craft expired/foreign tokens. */
-async function mint(ch: string, expiresInSeconds: number, key: Uint8Array = SIGNING_KEY): Promise<string> {
+/** Mint a JWT directly (bypassing /token) so we can craft expired/foreign/bot-scoped tokens. */
+async function mint(
+  ch: string,
+  expiresInSeconds: number,
+  opts: { key?: Uint8Array; bot?: string } = {},
+): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return await new SignJWT({ ch })
+  return await new SignJWT({ ch, ...(opts.bot ? { bot: opts.bot } : {}) })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt(now)
     .setExpirationTime(now + expiresInSeconds)
-    .sign(key);
+    .sign(opts.key ?? SIGNING_KEY);
 }
 
 Deno.test({
@@ -59,6 +64,7 @@ Deno.test({
     args: ["run", "--allow-net", "--allow-env", new URL("./discord-message-proxy.ts", import.meta.url).pathname],
     env: {
       DISCORD_BOT_TOKEN: BOT_TOKEN,
+      DISCORD_BOT_TOKEN_SUPPORT: SUPPORT_BOT_TOKEN,
       SIGNING_SECRET: SECRET,
       UPSTREAM: `http://127.0.0.1:${upstream.addr.port}`,
       PORT: "0",
@@ -150,6 +156,12 @@ Deno.test({
       await res.body?.cancel();
     });
 
+    await t.step("GET /bots lists the configured named bots", async () => {
+      const res = await fetch(`${base}/bots`);
+      assertEquals(res.status, 200);
+      assertEquals(await res.json(), { bots: ["SUPPORT"] });
+    });
+
     let issuedToken = "";
     await t.step("POST /token mints a JWT with the right secret", async () => {
       const res = await issue({ secret: SECRET, channels: ` ${CH} , ${OTHER} `, expiresIn: 3600 });
@@ -157,10 +169,39 @@ Deno.test({
       const data = await res.json();
       assertMatch(data.token, /^[\w-]+\.[\w-]+\.[\w-]+$/);
       assertMatch(data.expiresAt, /^\d{4}-\d{2}-\d{2}T/);
+      assertEquals(data.bot, undefined); // default bot: no "bot" field
       const payload = JSON.parse(atob(data.token.split(".")[1]));
       assertEquals(payload.ch, `${CH},${OTHER}`); // whitespace normalized away
+      assertEquals(payload.bot, undefined);
       assert(typeof payload.exp === "number");
       issuedToken = data.token;
+    });
+
+    await t.step("POST /token rejects an unknown bot name", async () => {
+      const res = await issue({ secret: SECRET, channels: CH, expiresIn: 3600, bot: "GHOST" });
+      assertEquals(res.status, 400);
+      await res.body?.cancel();
+    });
+
+    await t.step("POST /token mints a bot-scoped JWT for a configured named bot", async () => {
+      const res = await issue({ secret: SECRET, channels: CH, expiresIn: 3600, bot: "SUPPORT" });
+      assertEquals(res.status, 200);
+      const data = await res.json();
+      assertEquals(data.bot, "SUPPORT");
+      const payload = JSON.parse(atob(data.token.split(".")[1]));
+      assertEquals(payload.bot, "SUPPORT");
+
+      const proxied = await api(`/api/v10/channels/${CH}/messages`, {}, data.token);
+      assertEquals(proxied.status, 200);
+      await proxied.body?.cancel();
+      assertEquals(lastUpstream?.auth, `Bot ${SUPPORT_BOT_TOKEN}`); // routed to the named bot's real token
+    });
+
+    await t.step("a token naming a bot that's no longer configured is rejected", async () => {
+      const token = await mint(CH, 3600, { bot: "GHOST" });
+      const res = await api(`/api/v10/channels/${CH}/messages`, {}, token);
+      assertEquals(res.status, 401);
+      await res.body?.cancel();
     });
 
     await t.step("proxies an allowed GET and swaps in the real bot token", async () => {
@@ -171,7 +212,7 @@ Deno.test({
       assertEquals(lastUpstream?.method, "GET");
       assertEquals(lastUpstream?.path, `/api/v10/channels/${CH}/messages`);
       assertEquals(lastUpstream?.search, "?limit=5");
-      assertEquals(lastUpstream?.auth, `Bot ${BOT_TOKEN}`);
+      assertEquals(lastUpstream?.auth, `Bot ${BOT_TOKEN}`); // default bot, unaffected by the named bot above
     });
 
     await t.step("accepts a bare token without the Bot prefix", async () => {
@@ -235,7 +276,7 @@ Deno.test({
 
     await t.step("rejects missing, garbage, expired, and foreign-signed tokens", async () => {
       const expired = await mint(CH, -3600);
-      const foreign = await mint(CH, 3600, new TextEncoder().encode("another-secret-0123456789"));
+      const foreign = await mint(CH, 3600, { key: new TextEncoder().encode("another-secret-0123456789") });
       const tampered = issuedToken.slice(0, -2) + "xx";
       const attempts: (string | undefined)[] = [undefined, "garbage", expired, foreign, tampered];
       for (const token of attempts) {
