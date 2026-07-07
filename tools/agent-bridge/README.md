@@ -25,14 +25,14 @@ export DISCORD_API='https://your-proxy.example/api/v10'   # optional; omit to ta
 
 ## Commands
 
-| Command                                      | Description                                                                                                                 |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| _(none)_                                     | Print usage.                                                                                                                |
-| `send [text...] [--file <path>]`             | Send a message. Text comes from the arguments, `--file`, or stdin, in that order of preference. Prints the created message. |
-| `edit <messageId> [text...] [--file <path>]` | Edit a message this bot previously sent. Text sources same as `send`.                                                       |
-| `delete <messageId>`                         | Delete a message. Prints `{"deleted":"<id>"}`.                                                                              |
-| `read [--limit N] [--include-bots]`          | Fetch up to `N` recent messages once (default 50, max 100), oldest first.                                                   |
-| `monitor [--include-bots]`                   | Poll for new messages forever, printing each as it arrives. Never exits.                                                    |
+| Command                                      | Description                                                                                                                                                                                                       |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| _(none)_                                     | Print usage.                                                                                                                                                                                                      |
+| `send [text...] [--file <path>]`             | Send a message. Text comes from the arguments, `--file`, or stdin, in that order of preference. Prints the created message.                                                                                       |
+| `edit <messageId> [text...] [--file <path>]` | Edit a message this bot previously sent. Text sources same as `send`.                                                                                                                                             |
+| `delete <messageId>`                         | Delete a message. Prints `{"deleted":"<id>"}`.                                                                                                                                                                    |
+| `read [--limit N] [--include-bots]`          | Fetch up to `N` recent messages once (default 50, max 100), oldest first.                                                                                                                                         |
+| `monitor [--include-bots]`                   | Poll for new messages forever, printing each as it arrives. **Never exits** — launch it through a background/watch mechanism that supports an indefinite or persistent run, not one with a short default timeout. |
 
 ```sh
 ./discord-agent-bridge.ts send hello world      # text from args
@@ -52,6 +52,9 @@ echo "multi-line text" | ./discord-agent-bridge.ts send   # text from stdin
 | `DISCORD_CHANNEL`       | ✅       | —                             | Channel id to operate on.                                                                              |
 | `DISCORD_API`           |          | `https://discord.com/api/v10` | API base URL. Point this at a `discord-message-proxy` to use a scoped JWT instead of a real bot token. |
 | `DISCORD_POLL_INTERVAL` |          | `20`                          | `monitor` poll interval, in seconds.                                                                   |
+
+If `DISCORD_TOKEN` / `DISCORD_CHANNEL` aren't set and you don't know them, **ask the user** instead of guessing — they
+may hand you a bot token and channel id directly, or a proxy URL plus a token minted from a `discord-message-proxy`.
 
 ## Output
 
@@ -80,6 +83,8 @@ one-line-per-message output is built to feed line-oriented watchers without any 
 This tool is meant for looping teammates into a session over Discord — e.g. an agent that wants a second opinion or a
 heads-up from someone not in the room. When used that way, an agent should:
 
+- **Run `monitor` through a persistent/indefinite watch** — it never exits on its own, so a background mechanism with a
+  short default timeout will kill it before the next message ever arrives, and messages will be missed silently.
 - **Greet on `monitor` startup** — send a message like "You can type here — I'm watching this channel now" before going
   quiet, so people know it's safe to type.
 - **Acknowledge before working** — when a message arrives, reply briefly with what you understood and what you'll do
