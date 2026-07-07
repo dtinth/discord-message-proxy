@@ -20,7 +20,8 @@
  *   edit <messageId> [text...] [--file <path>]    edit a message this bot sent
  *   delete <messageId>                            delete a message
  *   read [--limit N] [--include-bots]             fetch recent messages once, oldest first
- *   monitor [--include-bots]                      poll for new messages forever
+ *   monitor [--include-bots]                      poll for new messages forever (never exits —
+ *                                                  launch via a persistent/indefinite background watch)
  *
  * ── Config (env) ─────────────────────────────────────────────────────────────
  *   DISCORD_TOKEN          (required)  bot token or proxy JWT; sent as "Bot <token>"
@@ -51,6 +52,11 @@ Usage:
       Watch for new messages: remembers the latest message at startup, then polls and
       prints each newer message as it arrives. Never exits; transient errors are
       retried. Messages from bots are skipped unless --include-bots is passed.
+      IMPORTANT: this command runs forever by design — it is meant to be launched through
+      a background/watch mechanism that supports an indefinite or persistent run (e.g. a
+      "persistent: true" option), not one with a short default timeout. A watch that times
+      out after a few minutes will be killed long before the next message arrives and you
+      will silently miss messages.
 
 Environment:
   DISCORD_TOKEN          (required)  bot token or proxy JWT; sent as "Authorization: Bot <token>"
@@ -58,6 +64,10 @@ Environment:
   DISCORD_API            (optional)  API base URL, default https://discord.com/api/v10
                                      (point this at a discord-message-proxy to use a scoped JWT)
   DISCORD_POLL_INTERVAL  (optional)  monitor poll interval in seconds, default 20
+
+  If you don't have DISCORD_TOKEN / DISCORD_CHANNEL yet, ask the user for them instead of
+  guessing — they may hand you a bot token and channel id directly, or a proxy URL plus a
+  token minted from a discord-message-proxy (see DISCORD_API above).
 
 Output format (NDJSON, one message per line):
   {"id":"…","timestamp":"2026-01-01T00:00:00.000000+00:00","author":"name","author_id":"…","bot":false,"content":"hi"}
