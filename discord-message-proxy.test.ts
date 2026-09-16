@@ -44,8 +44,25 @@ Deno.test({
 }, async (t) => {
   // Dummy upstream standing in for discord.com: records the request, replies 200.
   let lastUpstream: UpstreamRequest | null = null;
+  // Channel-object responses for the proxy's channel → guild lookups, plus a counter so
+  // tests can prove a lookup happened — or didn't, thanks to the cache.
+  const channelObjects = new Map<string, { status: number; body: unknown }>();
+  let lookups = 0;
+  let lastLookupAuth: string | null = null;
   const upstream = Deno.serve({ port: 0, onListen: () => {} }, async (req) => {
     const url = new URL(req.url);
+    const lookup = /^\/api\/v10\/channels\/(\d+)$/.exec(url.pathname);
+    if (lookup && req.method === "GET") {
+      // Kept out of lastUpstream: it records the *proxied* request under test.
+      lookups++;
+      lastLookupAuth = req.headers.get("authorization");
+      const canned = channelObjects.get(lookup[1]);
+      if (!canned) return new Response(JSON.stringify({ message: "Unknown Channel" }), { status: 404 });
+      return new Response(JSON.stringify(canned.body), {
+        status: canned.status,
+        headers: { "content-type": "application/json" },
+      });
+    }
     lastUpstream = {
       method: req.method,
       path: url.pathname,
@@ -94,6 +111,13 @@ Deno.test({
   const base = `http://127.0.0.1:${port}`;
   const CH = "123456789012345678";
   const OTHER = "999999999999999999";
+  const GUILD = "111111111111111111";
+  const IN_GUILD = "222222222222222222"; // a channel inside GUILD
+  const OTHER_GUILD_CH = "333333333333333333"; // a channel inside OTHER
+  const DM = "444444444444444444"; // a channel object with no guild_id
+  const UNKNOWN = "555555555555555555"; // upstream 404s this one
+  const BROKEN = "666666666666666666"; // upstream 500s this one
+  const PER_BOT_CH = "777777777777777777"; // used to show the cache is keyed per bot
 
   const api = (path: string, init: RequestInit = {}, token?: string) =>
     fetch(`${base}${path}`, {
@@ -120,6 +144,19 @@ Deno.test({
       assertEquals(res.status, 200);
       assertStringIncludes(res.headers.get("content-type") ?? "", "text/html");
       assertStringIncludes(await res.text(), "discord-message-proxy");
+    });
+
+    await t.step("the minting UI's script survives template-literal escaping", async () => {
+      // UI_HTML is a TS template literal, where a regex written /^\d+$/ silently
+      // collapses to /^d+$/ — so exercise the script the server actually serves.
+      const html = await (await fetch(base)).text();
+      const src = html.match(/<script>\n([\s\S]*?)\n<\/script>/)?.[1] ?? "";
+      const describeScope = new Function(
+        src.match(/function describeScope[\s\S]*?\n}/)?.[0] + "; return describeScope;",
+      )() as (entries: string[]) => string;
+      assertEquals(describeScope(["123"]), "123");
+      assertEquals(describeScope(["*"]), "any channel the bot can see");
+      assertEquals(describeScope(["111:*", "222"]), "222; any channel in server 111");
     });
 
     await t.step("POST / is rejected", async () => {
@@ -272,6 +309,117 @@ Deno.test({
       const res = await api(`/api/v10/channels/424242424242424242/messages`, {}, token);
       assertEquals(res.status, 200);
       await res.body?.cancel();
+    });
+
+    await t.step('POST /token accepts and normalizes guild scopes ("<guildId>:*")', async () => {
+      const res = await issue({ secret: SECRET, channels: ` ${GUILD}:* , ${CH} `, expiresIn: 3600 });
+      assertEquals(res.status, 200);
+      const data = await res.json();
+      assertEquals(JSON.parse(atob(data.token.split(".")[1])).ch, `${GUILD}:*,${CH}`);
+    });
+
+    await t.step("POST /token rejects malformed guild scopes", async () => {
+      for (const channels of [":*", `${GUILD}:`, `${GUILD}:*:*`, "*:*", `${GUILD}:${CH}`, `${GUILD}:x`]) {
+        const res = await issue({ secret: SECRET, channels, expiresIn: 3600 });
+        assertEquals(res.status, 400, `channels=${JSON.stringify(channels)}`);
+        await res.body?.cancel();
+      }
+    });
+
+    await t.step("a guild-scoped token reaches a channel in that guild, and caches the lookup", async () => {
+      channelObjects.set(IN_GUILD, { status: 200, body: { id: IN_GUILD, guild_id: GUILD } });
+      const token = await mint(`${GUILD}:*`, 3600);
+
+      lookups = 0;
+      const first = await api(`/api/v10/channels/${IN_GUILD}/messages`, {}, token);
+      assertEquals(first.status, 200);
+      await first.body?.cancel();
+      assertEquals(lookups, 1);
+      assertEquals(lastLookupAuth, `Bot ${BOT_TOKEN}`); // asked with the request's own bot token
+      assertEquals(lastUpstream?.path, `/api/v10/channels/${IN_GUILD}/messages`);
+      assertEquals(lastUpstream?.auth, `Bot ${BOT_TOKEN}`);
+
+      const second = await api(`/api/v10/channels/${IN_GUILD}/messages`, {}, token);
+      assertEquals(second.status, 200);
+      await second.body?.cancel();
+      assertEquals(lookups, 1); // served from cache; no second round trip
+    });
+
+    await t.step("a guild-scoped token is refused for a channel in another guild", async () => {
+      channelObjects.set(OTHER_GUILD_CH, { status: 200, body: { id: OTHER_GUILD_CH, guild_id: OTHER } });
+      const token = await mint(`${GUILD}:*`, 3600);
+      const res = await api(`/api/v10/channels/${OTHER_GUILD_CH}/messages`, {}, token);
+      assertEquals(res.status, 403);
+      await res.body?.cancel();
+    });
+
+    await t.step("a guild-scoped token is refused for a DM (no guild_id) and an unknown channel", async () => {
+      channelObjects.set(DM, { status: 200, body: { id: DM, type: 1 } }); // no guild_id
+      const token = await mint(`${GUILD}:*`, 3600);
+      for (const channel of [DM, UNKNOWN]) {
+        const res = await api(`/api/v10/channels/${channel}/messages`, {}, token);
+        assertEquals(res.status, 403, `channel=${channel}`);
+        await res.body?.cancel();
+      }
+    });
+
+    await t.step("a failed lookup fails the request (502) instead of allowing or denying it", async () => {
+      channelObjects.set(BROKEN, { status: 500, body: { message: "upstream sad" } });
+      const token = await mint(`${GUILD}:*`, 3600);
+      lookups = 0;
+      const res = await api(`/api/v10/channels/${BROKEN}/messages`, {}, token);
+      assertEquals(res.status, 502);
+      await res.body?.cancel();
+
+      // Transient failures aren't cached, so the next attempt tries again.
+      const retry = await api(`/api/v10/channels/${BROKEN}/messages`, {}, token);
+      assertEquals(retry.status, 502);
+      await retry.body?.cancel();
+      assertEquals(lookups, 2);
+    });
+
+    await t.step("a mixed token uses its literal channels without any lookup", async () => {
+      const token = await mint(`${CH},${GUILD}:*`, 3600);
+      lookups = 0;
+      const literal = await api(`/api/v10/channels/${CH}/messages`, {}, token);
+      assertEquals(literal.status, 200);
+      await literal.body?.cancel();
+      assertEquals(lookups, 0); // the literal id settles it; no channel → guild call
+
+      const viaGuild = await api(`/api/v10/channels/${IN_GUILD}/messages`, {}, token);
+      assertEquals(viaGuild.status, 200);
+      await viaGuild.body?.cancel();
+    });
+
+    await t.step("guild lookups are keyed per bot, so one bot's miss can't answer for another", async () => {
+      // Visibility is per-bot upstream, so a cached answer must not cross bots. Both bots
+      // resolve this channel here; what matters is that each pays for its own lookup
+      // rather than inheriting the other's cache entry.
+      channelObjects.set(PER_BOT_CH, { status: 200, body: { id: PER_BOT_CH, guild_id: GUILD } });
+      const supportToken = await mint(`${GUILD}:*`, 3600, { bot: "SUPPORT" });
+      lookups = 0;
+      const res = await api(`/api/v10/channels/${PER_BOT_CH}/messages`, {}, supportToken);
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
+      assertEquals(lookups, 1);
+      assertEquals(lastLookupAuth, `Bot ${SUPPORT_BOT_TOKEN}`);
+
+      // The default bot's token for the same channel gets its own lookup, not SUPPORT's entry.
+      const defaultToken = await mint(`${GUILD}:*`, 3600);
+      const other = await api(`/api/v10/channels/${PER_BOT_CH}/messages`, {}, defaultToken);
+      assertEquals(other.status, 200);
+      await other.body?.cancel();
+      assertEquals(lookups, 2);
+      assertEquals(lastLookupAuth, `Bot ${BOT_TOKEN}`);
+    });
+
+    await t.step("a token whose scope this version can't parse is rejected", async () => {
+      for (const ch of [`${GUILD}:${CH}`, "everything", `${CH}:*:*`, ""]) {
+        const token = await mint(ch, 3600);
+        const res = await api(`/api/v10/channels/${CH}/messages`, {}, token);
+        assertEquals(res.status, 401, `ch=${JSON.stringify(ch)}`);
+        await res.body?.cancel();
+      }
     });
 
     await t.step("rejects missing, garbage, expired, and foreign-signed tokens", async () => {

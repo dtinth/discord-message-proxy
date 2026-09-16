@@ -15,6 +15,10 @@
  * web UI at GET / (paste the signing secret, pick channels and a lifetime, copy the
  * token — or a ready-made prompt for an AI agent), or POST /token directly.
  *
+ * A scope entry is a channel id, "<guildId>:*" for every channel in one guild, or "*"
+ * for every channel the bot can see. Guild entries are resolved by asking Discord which
+ * guild the requested channel belongs to (cached, see "channel → guild resolution").
+ *
  * Unlike a full pass-through, this proxy only permits **reading, posting, editing, and
  * deleting messages** in the token's allowed channels:
  *
@@ -73,6 +77,20 @@ const MAX_EXPIRES_IN = 10 * 365 * 24 * 60 * 60;
 // Capture groups: (1) channel id, (2) optional "/<message id>" for single-message ops.
 const MESSAGE_ROUTE = /^\/api\/v\d+\/channels\/(\d+)\/messages(\/\d+)?$/;
 
+// One entry of a token's comma-separated scope list. ":*" is the only suffix form there
+// is — keep it that way, so any future syntax stays a deliberate decision.
+//   "*"            any channel the bot can see
+//   "<channelId>"  that one channel
+//   "<guildId>:*"  any channel in that guild
+const SCOPE_ENTRY = /^(?:\*|\d+|\d+:\*)$/;
+
+// Channel → guild answers are cached: a channel can never move between guilds, so a
+// successful lookup is good forever, while a miss (unknown channel, or one this bot
+// can't see) is retried after a short delay. The cache is bounded so a client spraying
+// random ids can't grow it without limit.
+const GUILD_CACHE_MAX = 4096;
+const GUILD_MISS_TTL_MS = 60_000;
+
 // Hop-by-hop request headers we must not forward, plus ones we set ourselves.
 const STRIP_REQ = new Set(["host", "authorization", "content-length", "connection"]);
 // Response headers that describe the wire encoding of the ORIGINAL body. Deno's
@@ -110,20 +128,44 @@ async function handler(req: Request): Promise<Response> {
     return json(401, { message: "proxy: unauthorized", code: 0 });
   }
 
-  // 2. Enforce the narrow scope: only message ops in the token's channels.
-  if (!isAllowed(req.method, url.pathname, claims.channels)) {
-    log(`403 ${req.method} ${url.pathname} (not permitted for this token)`);
+  // 2. Enforce the narrow route surface: only message ops under a channel.
+  const channelId = messageRouteChannel(req.method, url.pathname);
+  if (!channelId) {
+    log(`403 ${req.method} ${url.pathname} (route not allowed)`);
     return json(403, { message: "proxy: route not allowed", code: 0 });
   }
 
-  // 3. Resolve which real bot token to use — the token's own name, or the default.
+  // 3. Check the channel against the token's scope. Literal ids (and "*") are settled
+  //    here with no I/O; a guild entry needs a lookup, which waits until step 5 so it
+  //    can use the same bot token the request itself will.
+  const inScope = claims.channels.has("*") || claims.channels.has(channelId);
+  if (!inScope && claims.guilds.size === 0) {
+    log(`403 ${req.method} ${url.pathname} (channel outside this token's scope)`);
+    return json(403, { message: "proxy: channel not allowed", code: 0 });
+  }
+
+  // 4. Resolve which real bot token to use — the token's own name, or the default.
   const botToken = claims.bot ? NAMED_BOT_TOKENS.get(claims.bot) : DEFAULT_BOT_TOKEN;
   if (!botToken) {
     log(`401 ${req.method} ${url.pathname} (bot "${claims.bot}" no longer configured)`);
     return json(401, { message: "proxy: bot no longer configured", code: 0 });
   }
 
-  // 4. Rebuild the request toward Discord with the REAL bot token swapped in.
+  // 5. Guild-scoped token, channel not named literally: ask Discord which guild the
+  //    channel is in. A failed lookup fails the request — it never falls through.
+  if (!inScope) {
+    const lookup = await resolveGuild(channelId, claims.bot ?? "", botToken);
+    if (!lookup.ok) {
+      log(`502 ${req.method} ${url.pathname} (channel → guild lookup failed)`);
+      return json(502, { message: "proxy: channel lookup failed", code: 0 });
+    }
+    if (!lookup.guildId || !claims.guilds.has(lookup.guildId)) {
+      log(`403 ${req.method} ${url.pathname} (channel outside this token's guilds)`);
+      return json(403, { message: "proxy: channel not allowed", code: 0 });
+    }
+  }
+
+  // 6. Rebuild the request toward Discord with the REAL bot token swapped in.
   const headers = new Headers();
   for (const [k, v] of req.headers) {
     if (!STRIP_REQ.has(k.toLowerCase())) headers.set(k, v);
@@ -144,7 +186,7 @@ async function handler(req: Request): Promise<Response> {
     return json(502, { message: "proxy: upstream fetch failed", code: 0 });
   }
 
-  // 5. Relay the response verbatim (rate-limit headers included), minus wire-encoding headers.
+  // 7. Relay the response verbatim (rate-limit headers included), minus wire-encoding headers.
   const out = new Headers();
   for (const [k, v] of upstream.headers) {
     if (!STRIP_RES.has(k.toLowerCase())) out.set(k, v);
@@ -173,7 +215,10 @@ async function issueToken(req: Request): Promise<Response> {
 
   const ch = normalizeChannels(body.channels);
   if (!ch) {
-    return json(400, { message: 'proxy: channels must be comma-separated channel ids, or "*"', code: 0 });
+    return json(400, {
+      message: 'proxy: channels must be comma-separated channel ids, "<guildId>:*", or "*"',
+      code: 0,
+    });
   }
 
   const expiresIn = body.expiresIn;
@@ -204,42 +249,51 @@ async function issueToken(req: Request): Promise<Response> {
   return json(200, { token, expiresAt, ...(botInput ? { bot: botInput } : {}) });
 }
 
-/** Accept "123,456" or "*"; return the normalized claim string, or undefined if invalid. */
+/** Accept a scope list — "123,456", "123:*" (a whole guild), "*", or any mix; return
+ * the normalized claim string, or undefined if any entry is invalid. */
 function normalizeChannels(input: unknown): string | undefined {
   if (typeof input !== "string") return undefined;
-  const t = input.trim();
-  if (t === "*") return "*";
-  const ids = t.split(",").map((c) => c.trim()).filter(Boolean);
-  if (ids.length === 0 || !ids.every((c) => /^\d+$/.test(c))) return undefined;
-  return ids.join(",");
+  const entries = input.trim().split(",").map((c) => c.trim()).filter(Boolean);
+  if (entries.length === 0 || !entries.every((c) => SCOPE_ENTRY.test(c))) return undefined;
+  return entries.join(",");
 }
 
 // ── token verification ─────────────────────────────────────────────────────
 
 interface TokenClaims {
-  channels: Set<string>;
+  channels: Set<string>; // literal channel ids, plus "*" if the token carries it
+  guilds: Set<string>; // guilds whose every channel is allowed (from "<guildId>:*" entries)
   bot?: string; // absent means the default bot
 }
 
-/** Verify the JWT (signature + expiry) and return its channel scope and bot name, or undefined. */
+/** Verify the JWT (signature + expiry) and return its scope and bot name, or undefined. */
 async function verifyToken(token: string): Promise<TokenClaims | undefined> {
   try {
     const { payload } = await jwtVerify(token, SIGNING_KEY, { algorithms: ["HS256"] });
     if (typeof payload.ch !== "string") return undefined;
-    const channels = new Set(payload.ch.split(",").map((c) => c.trim()).filter(Boolean));
-    if (channels.size === 0) return undefined;
+    const channels = new Set<string>();
+    const guilds = new Set<string>();
+    for (const entry of payload.ch.split(",").map((c) => c.trim()).filter(Boolean)) {
+      // An entry this version doesn't understand fails the whole token, rather than
+      // being silently dropped into a narrower scope than the minter intended.
+      if (!SCOPE_ENTRY.test(entry)) return undefined;
+      if (entry.endsWith(":*")) guilds.add(entry.slice(0, -2));
+      else channels.add(entry);
+    }
+    if (channels.size === 0 && guilds.size === 0) return undefined;
     if (payload.bot !== undefined && typeof payload.bot !== "string") return undefined;
-    return { channels, bot: payload.bot || undefined };
+    return { channels, guilds, bot: payload.bot || undefined };
   } catch {
     return undefined;
   }
 }
 
-/** Only message list/fetch (GET), post (POST), edit (PATCH), and delete (DELETE)
- * within an allowed channel. */
-function isAllowed(method: string, pathname: string, channels: Set<string>): boolean {
+/** The channel a request targets, if it's one of the message operations this proxy
+ * exposes — list/fetch (GET), post (POST), edit (PATCH), delete (DELETE). Anything
+ * else returns undefined, whatever the token's scope. */
+function messageRouteChannel(method: string, pathname: string): string | undefined {
   const m = MESSAGE_ROUTE.exec(pathname);
-  if (!m) return false;
+  if (!m) return undefined;
   const [, channelId, singleMessage] = m;
   // GET works on the collection and a single message; POST only on the collection;
   // PATCH (edit) and DELETE only target a single message.
@@ -247,8 +301,104 @@ function isAllowed(method: string, pathname: string, channels: Set<string>): boo
   else if (method === "POST" && !singleMessage) { /* ok */ }
   else if (method === "PATCH" && singleMessage) { /* ok */ }
   else if (method === "DELETE" && singleMessage) { /* ok */ }
-  else return false;
-  return channels.has("*") || channels.has(channelId);
+  else return undefined;
+  return channelId;
+}
+
+// ── channel → guild resolution ─────────────────────────────────────────────
+// Only guild-scoped tokens ("<guildId>:*") ever reach this: Discord's message routes
+// carry no guild id, so the proxy has to ask. Tokens that name their channels outright
+// never trigger a lookup and never pay for one.
+
+interface GuildCacheEntry {
+  guildId: string | null; // null: resolved, but no guild applies (a DM, or invisible to this bot)
+  expiresAt: number; // Infinity once resolved successfully
+}
+
+type GuildLookup = { ok: true; guildId: string | null } | { ok: false };
+
+const guildCache = new Map<string, GuildCacheEntry>();
+const guildInFlight = new Map<string, Promise<GuildLookup>>();
+
+/**
+ * Which guild is this channel in? Served from cache when possible, else fetched from
+ * Discord with this request's own bot token.
+ *
+ * `{ok: true, guildId: null}` means the question was answered and no guild applies —
+ * a denial, not an error. `{ok: false}` means the lookup itself failed (network, rate
+ * limit, upstream 5xx) and nothing was cached; callers must fail the request rather
+ * than treat it as a denial or, worse, an allowance.
+ *
+ * Cache keys include the bot name because visibility is per-bot: one bot's "can't see
+ * it" must never answer for another bot.
+ */
+async function resolveGuild(channelId: string, botName: string, botToken: string): Promise<GuildLookup> {
+  const key = `${botName}\n${channelId}`;
+  const hit = guildCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) {
+    guildCache.delete(key); // re-insert, keeping the map in least-recently-used order
+    guildCache.set(key, hit);
+    return { ok: true, guildId: hit.guildId };
+  }
+
+  // Collapse concurrent lookups of the same channel into a single upstream call.
+  const pending = guildInFlight.get(key);
+  if (pending) return await pending;
+  const task = lookupGuild(channelId, botToken)
+    .then((result) => {
+      if (result.ok) cacheGuild(key, result.guildId);
+      return result;
+    })
+    .catch((err): GuildLookup => {
+      log(`channel lookup ${channelId} threw (${err instanceof Error ? err.message : err})`);
+      return { ok: false };
+    })
+    .finally(() => guildInFlight.delete(key));
+  guildInFlight.set(key, task);
+  return await task;
+}
+
+/** GET /channels/{id} upstream, reduced to "which guild" or "couldn't tell". */
+async function lookupGuild(channelId: string, botToken: string): Promise<GuildLookup> {
+  let res: Response;
+  try {
+    res = await fetch(`${UPSTREAM}/api/v10/channels/${channelId}`, {
+      headers: { authorization: `Bot ${botToken}`, "user-agent": DEFAULT_UA },
+    });
+  } catch (err) {
+    log(`channel lookup ${channelId} failed (${err instanceof Error ? err.message : err})`);
+    return { ok: false };
+  }
+  // Transient upstream trouble: don't bake it into the cache as a denial.
+  if (res.status === 429 || res.status >= 500) {
+    await res.body?.cancel();
+    log(`channel lookup ${channelId} got ${res.status} upstream`);
+    return { ok: false };
+  }
+  // 401/403/404: no such channel, or this bot can't see it. Cacheable, briefly.
+  if (!res.ok) {
+    await res.body?.cancel();
+    return { ok: true, guildId: null };
+  }
+  let body: { guild_id?: unknown };
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false };
+  }
+  // DMs and group DMs have no guild_id, so no guild entry can ever cover them.
+  return { ok: true, guildId: typeof body.guild_id === "string" ? body.guild_id : null };
+}
+
+function cacheGuild(key: string, guildId: string | null): void {
+  guildCache.delete(key); // re-inserted below, so a refresh doesn't evict something else
+  // Evict in insertion (≈ least-recently-used) order once full.
+  while (guildCache.size >= GUILD_CACHE_MAX) {
+    const oldest = guildCache.keys().next();
+    if (oldest.done) break;
+    guildCache.delete(oldest.value);
+  }
+  guildCache.set(key, { guildId, expiresAt: guildId ? Infinity : Date.now() + GUILD_MISS_TTL_MS });
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -366,7 +516,9 @@ const UI_HTML = /* html */ `<!doctype html>
   <p class="sub">Mint a channel-scoped access token. You need the proxy's signing secret.</p>
 
   <form class="card" id="form">
-    <label for="channels">Channel ID(s) <span class="hint">— comma-separated, or <code>*</code> for any channel</span></label>
+    <label for="channels">Channel ID(s) <span class="hint">— comma-separated;
+      <code>&lt;serverId&gt;:*</code> for every channel in one server, <code>*</code> for any channel the bot
+      can see</span></label>
     <input id="channels" required autocomplete="off" spellcheck="false" placeholder="123456789012345678">
 
     <label for="bot" class="bot-field" style="display:none">Bot <span class="hint">— which bot token this access
@@ -454,13 +606,27 @@ function maskToken(token) {
   return parts[0] + "." + parts[1] + "." + "*".repeat(parts[2].length);
 }
 
+/** Human-readable rendering of a scope list, for the prompt's "Allowed channel ID(s)" line. */
+function describeScope(entries) {
+  var parts = [];
+  if (entries.indexOf("*") !== -1) parts.push("any channel the bot can see");
+  var ids = entries.filter(function (e) { return /^\\d+$/.test(e); });
+  if (ids.length) parts.push(ids.join(", "));
+  entries.forEach(function (e) {
+    if (e.slice(-2) === ":*") parts.push("any channel in server " + e.slice(0, -2));
+  });
+  return parts.join("; ");
+}
+
 function buildPrompt(channels, token, expiresAt) {
-  var ids = channels === "*" ? [] : channels.split(",");
-  var ch = ids.length === 1 ? ids[0] : "{channelId}";
+  var entries = channels.split(",").filter(Boolean);
+  var ids = entries.filter(function (e) { return /^\\d+$/.test(e); });
+  // Inline a single concrete channel id in the routes; otherwise leave a placeholder.
+  var ch = entries.length === 1 && ids.length === 1 ? ids[0] : "{channelId}";
   var chExample = ids.length >= 1 ? ids[0] : "{channelId}";
   return PROMPT_TEMPLATE
     .replaceAll("{{ORIGIN}}", location.origin)
-    .replaceAll("{{CHANNELS}}", channels === "*" ? "any channel the bot can see" : channels)
+    .replaceAll("{{CHANNELS}}", describeScope(entries))
     .replaceAll("{{EXPIRES}}", expiresAt)
     .replaceAll("{{CH}}", ch)
     .replaceAll("{{CH_EXAMPLE}}", chExample)
