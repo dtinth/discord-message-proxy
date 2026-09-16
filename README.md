@@ -13,7 +13,7 @@ client ──(Bot <JWT>)──▶ proxy ──(Bot DISCORD_BOT_TOKEN)──▶ d
 
 Because tokens are stateless (HS256, signed with a shared secret), **granting access to a new channel is just minting a
 new token** — no config change, no redeploy. Mint tokens from the built-in web UI at `/`, or with a direct `POST /token`
-call.
+call. A token can name individual channels, or [a whole server](#whole-server-tokens) with `<serverId>:*`.
 
 Any Discord library or plain `curl` works — just override the API base URL. Everything on an allowed request (path,
 query, body, rate-limit headers, status codes) is relayed untouched.
@@ -37,9 +37,9 @@ Regardless of channel, a token may only hit these routes:
 | `PATCH`  | `/api/v{n}/channels/{id}/messages/{mid}` | edit a message    |
 | `DELETE` | `/api/v{n}/channels/{id}/messages/{mid}` | delete a message  |
 
-`{id}` must be in the token's allowed channel set. Editing is subject to Discord's own rule that a bot may only edit
-messages it authored; deleting other users' messages requires the bot to have the Manage Messages permission. Everything
-else — reactions, guild/user routes, bulk delete — returns `403`.
+`{id}` must be covered by the token's scope — named outright, inside a server the token allows, or `*`. Editing is
+subject to Discord's own rule that a bot may only edit messages it authored; deleting other users' messages requires the
+bot to have the Manage Messages permission. Everything else — reactions, guild/user routes, bulk delete — returns `403`.
 
 ## Quick start
 
@@ -70,7 +70,9 @@ Clients may present the token as either `Bot <token>` or a bare `<token>`.
 
 Tokens are JWTs signed with `SIGNING_SECRET` (HS256) carrying:
 
-- `ch` — allowed channel IDs, comma-separated (e.g. `"123,456"`), or `"*"` for any channel
+- `ch` — the scope: a comma-separated list whose entries are each a channel ID (`123`), a whole server (`123:*` — see
+  [Whole-server tokens](#whole-server-tokens)), or `*` for any channel the bot can see. Mixing is fine:
+  `"456,789,123:*"`
 - `bot` — which configured bot token to use (see [Multiple bots](#multiple-bots)); omitted means the default
 - `exp` — standard expiry; the proxy rejects expired tokens with `401`
 
@@ -88,9 +90,42 @@ curl http://localhost:8000/token \
 # → {"token": "eyJ...", "expiresAt": "2026-07-11T00:00:00.000Z"}
 ```
 
-`channels` is a comma-separated ID list or `"*"`; `expiresIn` is in seconds (60 to 10 years). An optional `bot` field
-selects a [named bot](#multiple-bots) (omit it, or pass `""`, for the default); an unknown name returns `400`. A wrong
-secret returns `401`.
+`channels` is the scope list described above — channel IDs, `<serverId>:*` entries, `"*"`, or a mix; `expiresIn` is in
+seconds (60 to 10 years). An optional `bot` field selects a [named bot](#multiple-bots) (omit it, or pass `""`, for the
+default); an unknown name returns `400`. A wrong secret returns `401`.
+
+## Whole-server tokens
+
+A `<serverId>:*` entry grants message access to **every channel in that server**, including channels created after the
+token was minted:
+
+```sh
+curl http://localhost:8000/token \
+  -H 'Content-Type: application/json' \
+  -d '{"secret": "your-signing-secret", "channels": "111111111111111111:*", "expiresIn": 604800}'
+```
+
+Discord's message routes carry only a channel ID, never a server ID, so the proxy can't tell from the request alone
+which server a channel belongs to. When a request's channel isn't named literally in the token, the proxy asks Discord
+(`GET /channels/{id}`, with that token's own bot credentials) and checks the `guild_id` it gets back. What that means in
+practice:
+
+- **One extra round trip, once per channel.** A channel can never move between servers, so a successful answer is cached
+  for the process's lifetime; subsequent requests cost nothing. Tokens that name their channels literally never trigger
+  a lookup at all, so nothing changes for them.
+- **Threads are included.** Thread IDs resolve to their parent server, so a server-scoped token reaches threads in that
+  server too.
+- **DMs are never included.** A DM or group DM has no `guild_id`, so no `:*` entry can cover it.
+- **A failed lookup fails the request.** If the channel is unknown or invisible to the bot, the proxy answers `403`; if
+  the lookup itself can't be completed (network error, upstream `429`/`5xx`), it answers `502` and caches nothing. It
+  never falls through to allowing the request.
+- **Lookups are per-bot and rate-limited like any other call.** Cache entries are keyed by bot, since visibility differs
+  between bots, and lookups draw on that bot's Discord rate-limit budget. Misses are cached briefly and the cache is
+  size-bounded, so a client spraying random channel IDs can't amplify into unbounded upstream traffic.
+
+`:*` is the only suffix form the proxy understands; anything else (`123:456`, `*:*`, a bare `:*`) is rejected at minting
+time, and a token carrying an entry this version can't parse is refused outright with `401` rather than being quietly
+narrowed.
 
 ## Multiple bots
 
@@ -171,6 +206,8 @@ CI runs all three on every push and pull request.
 
 ## Notes & limitations
 
+- **Server scope is resolved, not declared.** A `<serverId>:*` token makes authorization depend on a cached upstream
+  lookup rather than on the request alone — see [Whole-server tokens](#whole-server-tokens) for the failure modes.
 - **No revocation.** Stateless tokens can't be revoked individually; rotating `SIGNING_SECRET` invalidates every
   outstanding token.
 - **Shared rate-limit budget.** All clients share the bot's Discord rate limits — the proxy relays Discord's rate-limit
